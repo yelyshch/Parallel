@@ -5,6 +5,7 @@
 using namespace std;
 
 const int N = 5; // Розмір квадратної матриці
+const int M = 10000000;
 
 void fillMatrix(int matrix[N][N]) {
     srand(time(0));
@@ -42,14 +43,19 @@ void mirrorMatrix(int matrix[N][N]) {
 
 int main() {
     int matrix[N][N];
+    clock_t startTime = clock();
+    for (int iter = 0; iter < M; iter++) {
+        fillMatrix(matrix);
+        //cout << "First matrix:" << endl;
+        //printMatrix(matrix);
 
-    fillMatrix(matrix);
-    cout << "First matrix:" << endl;
-    printMatrix(matrix);
-
-    mirrorMatrix(matrix);
-    cout << "Matrix:" << endl;
-    printMatrix(matrix);
+        mirrorMatrix(matrix);
+        //cout << "Matrix:" << endl;
+        //printMatrix(matrix);
+    }
+    clock_t endTime = clock();
+    double seconds = (double (endTime - startTime)) / CLOCKS_PER_SEC;
+    cout << "For " << M << " repetitions: " << seconds << endl;
 
     return 0;
 }
