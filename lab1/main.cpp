@@ -6,9 +6,9 @@
 
 using namespace std;
 
-const int N = 1000; // Розмір квадратної матриці
+const int N = 100; // Розмір квадратної матриці
 const int M = 1000;
-const int THREADS = 4; // Кількість потоків
+const int THREADS = 6; // Кількість потоків
 
 int** allocateMatrix(int size) {
     int** matrix = new int*[size];
@@ -109,8 +109,8 @@ int main() {
 
     mirrorMatrix(matrix, N);
     cout << "Mirrored matrix:" << endl;
-    printMatrix(matrix, N);
+    printMatrix(matrix, N);*/
 
-    deallocateMatrix(matrix, N);*/
+    deallocateMatrix(matrix, N);
     return 0;
 }
