@@ -7,6 +7,10 @@
 using namespace std;
 using namespace chrono;
 
+const int SIZE = 1000000;
+const int MIN= 10;
+const int MAX = 10000;
+
 void generateRandomNumbers(vector<int>& numbers, int size, int min_val, int max_val) {
     numbers.clear();
     for (int i = 0; i < size; i++) {
@@ -44,7 +48,7 @@ int main() {
 
     auto startTime = high_resolution_clock::now();
 
-    generateRandomNumbers(numbers, 1000, 10, 1000000);
+    generateRandomNumbers(numbers, SIZE, MIN, MAX);
     findMultiplesOf17(numbers, count, min_element);
 
     auto endTime = high_resolution_clock::now();
@@ -52,6 +56,11 @@ int main() {
 
     printResults(count, min_element);
     cout << "Time: " << duration.count() << " microseconds" << endl;
+
+    /*for(int i = 1; i < SIZE; i++) {
+        cout << numbers[i] << " ";
+    }
+    cout << endl;*/
 
     return 0;
 }

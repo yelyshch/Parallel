@@ -1,6 +1,5 @@
 #include <iostream>
 #include <vector>
-#include <cstdlib>
 #include <ctime>
 #include <chrono>
 #include <thread>
@@ -10,10 +9,15 @@
 using namespace std;
 using namespace chrono;
 
+const int NUM_THREADS = 6;
+const int ARRAY_SIZE = 1000000;
+const int MIN = 10;
+const int MAX = 10000;
+
 mutex mtx;
 
 void generateRandomNumbers(vector<int>& numbers, int min_val, int max_val, int startIdx, int endIdx, int thread_id) {
-    mt19937 rng(chrono::steady_clock::now().time_since_epoch().count() + thread_id);
+    mt19937 rng(steady_clock::now().time_since_epoch().count() + thread_id);
     uniform_int_distribution<int> dist(min_val, max_val);
     for (int i = startIdx; i < endIdx; ++i) {
         numbers[i] = dist(rng);
@@ -50,8 +54,6 @@ void printResults(int count, int min_element) {
 }
 
 int main() {
-    const int NUM_THREADS = 6;
-    const int ARRAY_SIZE = 20;
     vector<int> numbers(ARRAY_SIZE);
     int count = 0;
     int min_element = -1;
@@ -65,7 +67,7 @@ int main() {
     int startIdx = 0;
     for (int i = 0; i < NUM_THREADS; ++i) {
         int endIdx = startIdx + chunkSize + (i < remainder ? 1 : 0);
-        threads.emplace_back(generateRandomNumbers, ref(numbers), 10, 1000000, startIdx, endIdx, i);
+        threads.emplace_back(generateRandomNumbers, ref(numbers), MIN, MAX, startIdx, endIdx, i);
         startIdx = endIdx;
     }
 
@@ -91,10 +93,9 @@ int main() {
     printResults(count, min_element);
     cout << "Time: " << duration.count() << " microseconds" << endl;
 
-    for (int num : numbers) {
-        cout << num << " ";
-    }
-    cout << endl;
+    /*for (int i = 0; i < ARRAY_SIZE; ++i) {
+        cout << numbers[i] << " ";
+    }*/
 
     return 0;
 }
