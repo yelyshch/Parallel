@@ -9,6 +9,7 @@
 #include <random>
 #include <fstream>
 #include <ctime>
+#include <atomic>
 
 struct Task {
     int id;
@@ -25,26 +26,27 @@ private:
     std::mutex queue_mtx;
     int totalExecutionTime;
     const int maxTime;
-    int rejectedTasks = 0;
+    int totalTasks;
+    int totalTasksWaiting;
 
 public:
-    TaskQueue() : totalExecutionTime(0), maxTime(60) {}
+    TaskQueue() : totalExecutionTime(0), maxTime(60), totalTasks(0), totalTasksWaiting(0) {}
 
     ~TaskQueue() {
-        std::lock_guard<std::mutex> lock(queue_mtx);
-        std::queue<Task>().swap(tasks);
+        clear();
     }
 
     bool addTask(int id, int estimatedTime, const std::function<void()>& taskFunc) {
         std::lock_guard<std::mutex> lock(queue_mtx);
+        totalTasks++;
         if (estimatedTime + totalExecutionTime > maxTime) {
             std::cout << "[TaskQueue] Rejected: task " << id << " (" << estimatedTime << " seconds)\n";
-            rejectedTasks++;
             return false;
         }
         tasks.emplace(id, estimatedTime, taskFunc);
         totalExecutionTime += estimatedTime;
         std::cout << "[TaskQueue] Task " << id << " added with estimated time: " << estimatedTime << " seconds\n";
+        totalTasksWaiting++;
         return true;
     }
 
@@ -53,12 +55,8 @@ public:
         if (tasks.empty()) return false;
         task = tasks.front();
         tasks.pop();
+        totalExecutionTime -= task.duration;
         return true;
-    }
-
-    int getRejectedTaskCount() {
-        std::lock_guard<std::mutex> lock(queue_mtx);
-        return rejectedTasks;
     }
 
     void swap(TaskQueue& other) noexcept {
@@ -77,7 +75,12 @@ public:
 
     int getTaskCount() {
         std::lock_guard<std::mutex> lock(queue_mtx);
-        return tasks.size();
+        return totalTasks;
+    }
+
+    int getTaskWaitingCount() {
+        std::lock_guard<std::mutex> lock(queue_mtx);
+        return totalTasksWaiting;
     }
 };
 
@@ -89,30 +92,35 @@ private:
     std::mutex mtx;
     std::condition_variable cv;
     bool stop;
-    int completedTasks = 0;
+    bool paused;
     int swapCount = 0;
+    int taskCounter = 0;
+    std::atomic<int> completedTasks{0};
+    std::atomic<int> rejectedTasks{0};
 
 public:
-    explicit ThreadPool(size_t numThreads) : stop(false) {
+    explicit ThreadPool(size_t numThreads) : stop(false), paused(false) {
         for (size_t i = 0; i < numThreads; ++i) {
             workers.emplace_back([this, i] {
                 while (true) {
                     Task task(0, 0, []{});
                     {
                         std::unique_lock<std::mutex> lock(mtx);
-                        cv.wait(lock, [this, &task] { return stop || mainQueue.getTask(task); });
+                        cv.wait(lock, [this, &task] { return stop || (!paused && mainQueue.getTask(task)); });
                         if (stop) return;
                     }
                     {
                         std::lock_guard<std::mutex> lock(mtx);
                         std::cout << "[Worker " << i << "] Executing task ID: " << task.id << " (" << task.duration << " seconds)\n";
+
                     }
+
                     std::this_thread::sleep_for(std::chrono::seconds(task.duration));
+                    completedTasks.fetch_add(1);
                     task.func();
                     {
                         std::lock_guard<std::mutex> lock(mtx);
                         std::cout << "[Worker " << i << "] Task ID: " << task.id << " completed.\n";
-                        completedTasks++;
                     }
                 }
             });
@@ -124,18 +132,51 @@ public:
             std::this_thread::sleep_for(std::chrono::seconds(40));
             {
                 std::lock_guard<std::mutex> lock(mtx);
+                if (paused) continue;
                 std::cout << "[Scheduler] Swapping queues and notifying workers.\n";
                 mainQueue.swap(bufferQueue);
                 bufferQueue.clear();
                 swapCount++;
             }
+
             logMetrics();
             cv.notify_all();
         }
     }
 
-    void addTask(int id, int estimatedTime, const std::function<void()>& taskFunc) {
-        bufferQueue.addTask(id, estimatedTime, taskFunc);
+    void addTask(int estimatedTime, const std::function<void()>& taskFunc) {
+        int taskId;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            taskId = taskCounter++;
+        }
+        bool added = bufferQueue.addTask(taskId, estimatedTime, taskFunc);
+        if (!added) {
+            rejectedTasks.fetch_add(1);
+        }
+    }
+
+    void pause() {
+        std::lock_guard<std::mutex> lock(mtx);
+        paused = true;
+    }
+
+    void resume() {
+        std::lock_guard<std::mutex> lock(mtx);
+        paused = false;
+        cv.notify_all();
+    }
+
+    void shutdown(bool immediate) {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            stop = true;
+            if (immediate) {
+                mainQueue.clear();
+                bufferQueue.clear();
+            }
+        }
+        cv.notify_all();
     }
 
     void logMetrics() {
@@ -145,42 +186,49 @@ public:
         std::time_t now = std::time(nullptr);
         logFile << "Time: " << std::ctime(&now)
                 << "Swap: " << swapCount
-                << " | Total Tasks: " << bufferQueue.getTaskCount() + completedTasks
-                << " | Rejected Tasks: " << bufferQueue.getRejectedTaskCount()
-                << " | Completed Tasks: " << completedTasks << "\n";
+                << " | Total Tasks: " << bufferQueue.getTaskCount() + mainQueue.getTaskCount()
+                << " | Rejected Tasks: " << rejectedTasks.load()
+                << " | Tasks that must be completed: " << bufferQueue.getTaskWaitingCount() + mainQueue.getTaskWaitingCount()
+                << " | Completed Tasks: " << completedTasks.load() << "\n";
         logFile.close();
     }
 
     ~ThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            stop = true;
-        }
-        cv.notify_all();
+        shutdown(false);
         for (std::thread &worker : workers) {
             worker.join();
         }
     }
 };
 
-int main() {
-    ThreadPool pool(4);
-    std::thread scheduler(&ThreadPool::scheduleExecution, &pool);
-
+void addTasksFromThread(ThreadPool &pool, int numTasks) {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dist(6, 14);
 
-    int i = 0;
-    while (true) {
+    for (int i = 0; i < numTasks; ++i) {
         int execTime = dist(gen);
-        pool.addTask(i, execTime, [i, execTime]() {
+        pool.addTask(execTime, [execTime]() {
             std::this_thread::sleep_for(std::chrono::seconds(execTime));
         });
-        ++i;
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
+
+int main() {
+    ThreadPool pool(4);
+    std::thread scheduler(&ThreadPool::scheduleExecution, &pool);
+
+    std::vector<std::thread> adders;
+    for (int i = 0; i < 1; ++i) {
+        adders.emplace_back(addTasksFromThread, std::ref(pool), 60);
     }
 
+    for (auto& t : adders) {
+        t.join();
+    }
+
+    pool.shutdown(false);
     scheduler.join();
     return 0;
 }
