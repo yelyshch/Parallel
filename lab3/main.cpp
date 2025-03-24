@@ -220,7 +220,7 @@ int main() {
     std::thread scheduler(&ThreadPool::scheduleExecution, &pool);
 
     std::vector<std::thread> adders;
-    for (int i = 0; i < 1; ++i) {
+    for (int i = 0; i < 3; ++i) {
         adders.emplace_back(addTasksFromThread, std::ref(pool), 60);
     }
 
