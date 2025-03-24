@@ -167,14 +167,10 @@ public:
         cv.notify_all();
     }
 
-    void shutdown(bool immediate) {
+    void shutdown() {
         {
             std::lock_guard<std::mutex> lock(mtx);
             stop = true;
-            if (immediate) {
-                mainQueue.clear();
-                bufferQueue.clear();
-            }
         }
         cv.notify_all();
     }
@@ -194,7 +190,7 @@ public:
     }
 
     ~ThreadPool() {
-        shutdown(false);
+        shutdown();
         for (std::thread &worker : workers) {
             worker.join();
         }
@@ -221,14 +217,14 @@ int main() {
 
     std::vector<std::thread> adders;
     for (int i = 0; i < 3; ++i) {
-        adders.emplace_back(addTasksFromThread, std::ref(pool), 60);
+        adders.emplace_back(addTasksFromThread, std::ref(pool), 100);
     }
 
     for (auto& t : adders) {
         t.join();
     }
 
-    pool.shutdown(false);
+    pool.shutdown();
     scheduler.join();
     return 0;
 }
