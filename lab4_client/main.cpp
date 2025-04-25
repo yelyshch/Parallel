@@ -94,7 +94,7 @@ int main() {
     }
 
     // Запит статусу
-    std::string status = "Status request";
+    std::string status = "Status";
     sendTLV(sock, TYPE_COMMAND, status.data(), status.size());
     if (receiveTLV(sock, type, value)) {
         std::string msg(value.begin(), value.end());

@@ -49,9 +49,11 @@ bool receiveTLV(SOCKET socket, uint8_t& type, std::vector<char>& value) {
 void mirrorMatrix(int** matrix, int size, int numThreads) {
     std::vector<std::thread> threads;
     auto swap = [&](int start, int end) {
-        for (int i = start; i < end; ++i)
-            for (int j = 0; j < i; ++j)
-                std::swap(matrix[i][j], matrix[j][i]);
+        for (int i = start; i < end; ++i) {
+            for (int j = 0; j < size - 1 - i; ++j) {
+                std::swap(matrix[i][j], matrix[size - 1 - j][size - 1 - i]);
+            }
+        }
     };
 
     int block = size / numThreads;
@@ -122,6 +124,7 @@ void taskExecution(SOCKET socket) {
                         sendTLV(socket, TYPE_COMMAND, ack1, strlen(ack1));
                         status = PROCESSING;
 
+
                         // Обробка в окремому потоці
                         std::thread worker([&]() {
                             mirrorMatrix(matrix, matrixSize, numThreads);
@@ -156,7 +159,7 @@ void taskExecution(SOCKET socket) {
                         for (int i = 0; i < matrixSize; ++i) delete[] matrix[i];
                         delete[] matrix;
 
-                        std::cout << "[LOG] Client task completed. Closing connection.\n" << std::endl;
+                        std::cout << "[LOG] Client task completed. Closing connection." << std::endl;
                         return;
 
                     } else {
