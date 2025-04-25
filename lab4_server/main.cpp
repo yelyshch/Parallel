@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <mutex>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -14,18 +15,26 @@ enum TLVType : uint8_t {
     TYPE_COMMAND = 4
 };
 
-void printArray(int** matrix, int size);
+enum Status {
+    IDLE,
+    PROCESSING,
+    COMPLETED
+};
 
-sockaddr_in initSocketAddr(sockaddr_in sockaddrIn);
+std::mutex statusMutex;
+Status currentStatus = IDLE;
+std::vector<int> resultMatrix;
+
+void sendTLV(SOCKET socket, TLVType type, const void* data, uint32_t length) {
+    send(socket, reinterpret_cast<const char*>(&type), sizeof(type), 0);
+    send(socket, reinterpret_cast<const char*>(&length), sizeof(length), 0);
+    send(socket, reinterpret_cast<const char*>(data), length, 0);
+}
 
 bool receiveTLV(SOCKET socket, uint8_t& type, std::vector<char>& value) {
-    type = 0;
     uint32_t length = 0;
-    int recvType = recv(socket, reinterpret_cast<char*>(&type), sizeof(type), 0);
-    if (recvType <= 0) return false;
-
-    int recvLen = recv(socket, reinterpret_cast<char*>(&length), sizeof(length), 0);
-    if (recvLen <= 0) return false;
+    if (recv(socket, reinterpret_cast<char*>(&type), sizeof(type), 0) <= 0) return false;
+    if (recv(socket, reinterpret_cast<char*>(&length), sizeof(length), 0) <= 0) return false;
 
     value.resize(length);
     int received = 0;
@@ -37,37 +46,26 @@ bool receiveTLV(SOCKET socket, uint8_t& type, std::vector<char>& value) {
     return true;
 }
 
-void sendTLV(SOCKET socket, TLVType type, const void* data, uint32_t length) {
-    send(socket, reinterpret_cast<const char*>(&type), sizeof(type), 0);
-    send(socket, reinterpret_cast<const char*>(&length), sizeof(length), 0);
-    send(socket, reinterpret_cast<const char*>(data), length, 0);
-}
-
-void mirrorMatrix(int** matrix, int size, int numThreads = 6) {
+void mirrorMatrix(int** matrix, int size, int numThreads) {
     std::vector<std::thread> threads;
-    auto swapElements = [&](int start, int end) {
-        for (int i = start; i < end; ++i) {
-            for (int j = 0; j < i; ++j) {
+    auto swap = [&](int start, int end) {
+        for (int i = start; i < end; ++i)
+            for (int j = 0; j < i; ++j)
                 std::swap(matrix[i][j], matrix[j][i]);
-            }
-        }
     };
 
-    int block_size = size / numThreads;
-    int start = 0;
-    int end = block_size;
+    int block = size / numThreads;
+    int start = 0, end = block;
 
     for (int i = 0; i < numThreads - 1; ++i) {
-        threads.emplace_back(swapElements, start, end);
+        threads.emplace_back(swap, start, end);
         start = end;
-        end += block_size;
+        end += block;
     }
 
-    threads.emplace_back(swapElements, start, size);
+    threads.emplace_back(swap, start, size);
 
-    for (auto& thread : threads) {
-        thread.join();
-    }
+    for (auto& t : threads) t.join();
 }
 
 void taskExecution(SOCKET socket) {
@@ -78,18 +76,30 @@ void taskExecution(SOCKET socket) {
         int matrixSize = 0;
         int numThreads = 0;
         int** matrix = nullptr;
+        Status status = IDLE;
 
-        std::cout << "Client connected! Thread id: " << std::this_thread::get_id() << std::endl;
+        std::cout << "[LOG] Client connected! Thread id: " << std::this_thread::get_id() << std::endl;
+
+        // Повідомляємо клієнту про підключення
+        const char* connMsg = "Connected to server";
+        sendTLV(socket, TYPE_COMMAND, connMsg, strlen(connMsg));
 
         while (receiveTLV(socket, type, value)) {
             switch (type) {
                 case TYPE_MATRIX_SIZE:
                     memcpy(&matrixSize, value.data(), sizeof(int));
+                    std::cout << "[LOG] Matrix size received: " << matrixSize << std::endl;
+                    sendTLV(socket, TYPE_COMMAND, "Matrix size received", 20);
                     break;
+
                 case TYPE_NUM_THREADS:
                     memcpy(&numThreads, value.data(), sizeof(int));
+                    std::cout << "[LOG] Number of threads received: " << numThreads << std::endl;
+                    sendTLV(socket, TYPE_COMMAND, "Threads received", 16);
                     break;
+
                 case TYPE_MATRIX_DATA: {
+                    std::cout << "[LOG] Receiving matrix data..." << std::endl;
                     matrix = new int*[matrixSize];
                     const int* data = reinterpret_cast<int*>(value.data());
                     for (int i = 0; i < matrixSize; ++i) {
@@ -98,103 +108,111 @@ void taskExecution(SOCKET socket) {
                             matrix[i][j] = data[i * matrixSize + j];
                         }
                     }
+                    std::cout << "[LOG] Matrix data received" << std::endl;
+                    sendTLV(socket, TYPE_COMMAND, "Matrix data received", 20);
                     break;
                 }
+
                 case TYPE_COMMAND: {
-                    std::string command(value.begin(), value.end());
-                    if (command != "Start execution") throw std::runtime_error("Invalid command");
-                    std::cout << "Start command received" << std::endl;
+                    std::string command(value.data(), value.size());
 
-                    const char* ack1 = "Execution begin";
-                    sendTLV(socket, TYPE_COMMAND, ack1, strlen(ack1));
+                    if (command == "Start execution") {
+                        std::cout << "[LOG] Start execution command received" << std::endl;
+                        const char* ack1 = "Execution begin";
+                        sendTLV(socket, TYPE_COMMAND, ack1, strlen(ack1));
+                        status = PROCESSING;
 
-                    std::thread worker(mirrorMatrix, matrix, matrixSize, numThreads);
-                    worker.join();
+                        // Обробка в окремому потоці
+                        std::thread worker([&]() {
+                            mirrorMatrix(matrix, matrixSize, numThreads);
+                            status = COMPLETED;
+                            std::cout << "[LOG] Matrix processing completed" << std::endl;
+                        });
 
-                    std::cout << "Execution ended! Thread id: " << std::this_thread::get_id() << std::endl;
+                        worker.join();
+                        std::cout << "[LOG] Execution ended. Awaiting result request." << std::endl;
+                        sendTLV(socket, TYPE_COMMAND, "Execution ended. Awaiting result request.", 41);
 
-                    const char* ack2 = "Execution ended";
-                    sendTLV(socket, TYPE_COMMAND, ack2, strlen(ack2));
+                    } else if (command == "Status") {
+                        std::string statusStr = (status == IDLE ? "idle" :
+                                                status == PROCESSING ? "processing" :
+                                                "completed");
+                        std::cout << "[LOG] Status requested -> " << statusStr << std::endl;
+                        sendTLV(socket, TYPE_COMMAND, statusStr.c_str(), statusStr.size());
 
-                    // Повернення матриці у вигляді TLV
-                    std::vector<int> flattened;
-                    for (int i = 0; i < matrixSize; ++i) {
-                        for (int j = 0; j < matrixSize; ++j) {
-                            flattened.push_back(matrix[i][j]);
-                        }
+                    } else if (command == "Get result") {
+                        std::cout << "[LOG] Client requested result" << std::endl;
+
+                        // Повернення обробленої матриці
+                        std::vector<int> flattened;
+                        for (int i = 0; i < matrixSize; ++i)
+                            for (int j = 0; j < matrixSize; ++j)
+                                flattened.push_back(matrix[i][j]);
+
+                        sendTLV(socket, TYPE_MATRIX_DATA, flattened.data(), flattened.size() * sizeof(int));
+                        std::cout << "[LOG] Result sent to client" << std::endl;
+
+                        // Очищення пам’яті
+                        for (int i = 0; i < matrixSize; ++i) delete[] matrix[i];
+                        delete[] matrix;
+
+                        std::cout << "[LOG] Client task completed. Closing connection.\n" << std::endl;
+                        return;
+
+                    } else {
+                        std::cout << "[LOG] Status: " << command << std::endl;
+                        sendTLV(socket, TYPE_COMMAND, command.c_str(), command.size());
                     }
-                    sendTLV(socket, TYPE_MATRIX_DATA, flattened.data(), flattened.size() * sizeof(int));
-
-                    //printArray(matrix, matrixSize);
-
-                    for (int i = 0; i < matrixSize; ++i) delete[] matrix[i];
-                    delete[] matrix;
-
-                    std::cout << "Client task completed" << std::endl;
-                    return;
+                    break;
                 }
+
                 default:
-                    throw std::runtime_error("Unknown TLV type");
+                    std::cerr << "[ERROR] Unknown TLV type received" << std::endl;
+                    sendTLV(socket, TYPE_COMMAND, "Unknown TLV type", 16);
+                    break;
             }
         }
+    } catch (const std::bad_alloc&) {
+        std::cerr << "[FATAL] Memory allocation failed (std::bad_alloc)" << std::endl;
+        sendTLV(socket, TYPE_COMMAND, "Memory error", 12);
     } catch (const std::exception& ex) {
-        const char* errorMsg = "Execution error";
-        sendTLV(socket, TYPE_COMMAND, errorMsg, strlen(errorMsg));
+        std::cerr << "[ERROR] Exception: " << ex.what() << std::endl;
+        sendTLV(socket, TYPE_COMMAND, "Execution error", 15);
     }
 
     closesocket(socket);
 }
 
+
+sockaddr_in initSocketAddr() {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(7777);
+    addr.sin_addr.S_un.S_addr = INADDR_ANY;
+    return addr;
+}
+
 int main() {
     WSADATA wsData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsData) != 0) {
-        std::cerr << "Can't initialize WinSock!" << std::endl;
-        return -1;
-    }
+    WSAStartup(MAKEWORD(2, 2), &wsData);
 
     SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == INVALID_SOCKET) {
-        std::cerr << "Can't create socket!" << std::endl;
-        return -1;
-    }
-
-    sockaddr_in serverAddr{};
-    serverAddr = initSocketAddr(serverAddr);
+    sockaddr_in serverAddr = initSocketAddr();
     bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
     listen(serverSocket, SOMAXCONN);
 
-    std::cout << "Server is running on port 7777" << std::endl;
+    std::cout << "Server is running on port 7777\n";
 
     while (true) {
         sockaddr_in client{};
         int clientSize = sizeof(client);
         SOCKET clientSocket = accept(serverSocket, (sockaddr*)&client, &clientSize);
-        if (clientSocket == INVALID_SOCKET) {
-            std::cerr << "Client connection failed" << std::endl;
-            continue;
+        if (clientSocket != INVALID_SOCKET) {
+            std::thread(taskExecution, clientSocket).detach();
         }
-
-        std::thread t(taskExecution, clientSocket);
-        t.detach();
     }
 
     closesocket(serverSocket);
     WSACleanup();
     return 0;
-}
-
-void printArray(int** matrix, int size) {
-    for (int i = 0; i < size; ++i) {
-        for (int j = 0; j < size; ++j) {
-            std::cout << matrix[i][j] << " ";
-        }
-        std::cout << std::endl;
-    }
-}
-
-sockaddr_in initSocketAddr(sockaddr_in sockaddrIn) {
-    sockaddrIn.sin_family = AF_INET;
-    sockaddrIn.sin_port = htons(7777);
-    sockaddrIn.sin_addr.S_un.S_addr = INADDR_ANY;
-    return sockaddrIn;
 }

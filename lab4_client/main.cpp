@@ -4,7 +4,8 @@
 #include <random>
 #include <iomanip>
 #include <cstdint>
-#include <cstring>
+#include <thread>
+
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -37,31 +38,25 @@ bool receiveTLV(SOCKET socket, uint8_t& type, std::vector<char>& value) {
 }
 
 void printMatrix(const std::vector<int>& matrix, int size) {
-    std::cout << "Generated matrix:\n";
-    for (int i = 0; i < size * size; ++i) {
-        std::cout << std::setw(4) << matrix[i];
-        if ((i + 1) % size == 0) std::cout << std::endl;
+    for (int i = 0; i < size; ++i) {
+        for (int j = 0; j < size; ++j) {
+            std::cout << std::setw(4) << matrix[i * size + j] << " ";
+        }
+        std::cout << "\n";
     }
-    std::cout << std::endl;
 }
 
 int main() {
-    // === Налаштування розміру матриці ===
-    int size=10000, numThreads = 1;
+    int size = 10, numThreads = 6;
 
-    // === Генерація випадкової матриці ===
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dist(1, 99);
     std::vector<int> matrix(size * size);
+    for (auto& val : matrix) val = dist(gen);
 
-    for (auto& val : matrix) {
-        val = dist(gen);
-    }
+    printMatrix(matrix, size);
 
-    //printMatrix(matrix, size);
-
-    // === WinSock setup ===
     WSADATA wsData;
     WSAStartup(MAKEWORD(2, 2), &wsData);
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -76,30 +71,44 @@ int main() {
         return 1;
     }
 
-    // === Надсилання TLV даних ===
+    uint8_t type;
+    std::vector<char> value;
+    if (receiveTLV(sock, type, value)) {
+        std::string msg(value.begin(), value.end());
+        std::cout << "Server: " << msg << std::endl;
+    }
+
     sendTLV(sock, TYPE_MATRIX_SIZE, &size, sizeof(size));
     sendTLV(sock, TYPE_NUM_THREADS, &numThreads, sizeof(numThreads));
     sendTLV(sock, TYPE_MATRIX_DATA, matrix.data(), matrix.size() * sizeof(int));
     std::string command = "Start execution";
     sendTLV(sock, TYPE_COMMAND, command.data(), command.size());
 
-    // === Очікування відповіді ===
-    uint8_t type;
-    std::vector<char> value;
-
+    // Читання повідомлень від сервера
     while (receiveTLV(sock, type, value)) {
         if (type == TYPE_COMMAND) {
             std::string msg(value.begin(), value.end());
             std::cout << "Server: " << msg << std::endl;
-        } else if (type == TYPE_MATRIX_DATA) {
-            const int* data = reinterpret_cast<const int*>(value.data());
-            std::cout << "Received mirrored matrix:\n";
-            /*for (int i = 0; i < size * size; ++i) {
-                std::cout << std::setw(4) << data[i];
-                if ((i + 1) % size == 0) std::cout << std::endl;
-            }*/
-            break;
+            if (msg.find("Awaiting result") != std::string::npos) break;
         }
+    }
+
+    // Запит статусу
+    std::string status = "Status request";
+    sendTLV(sock, TYPE_COMMAND, status.data(), status.size());
+    if (receiveTLV(sock, type, value)) {
+        std::string msg(value.begin(), value.end());
+        std::cout << "Server: " << msg << std::endl;
+    }
+
+    // Запит результату
+    std::string getResult = "Get result";
+    sendTLV(sock, TYPE_COMMAND, getResult.data(), getResult.size());
+
+    if (receiveTLV(sock, type, value) && type == TYPE_MATRIX_DATA) {
+        std::vector<int> resultMatrix(reinterpret_cast<int*>(value.data()), reinterpret_cast<int*>(value.data() + value.size()));
+        std::cout << "Mirrored matrix:\n";
+        printMatrix(resultMatrix, size);
     }
 
     closesocket(sock);
